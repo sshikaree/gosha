@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<title>Choose file to upload</title>
+
+    <style type="text/css">
+        table, th, td {
+            border: 1px solid lightgray;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 5px;
+        }
+    </style>
+</head>
+<body>
+
+	<form action="/upload" method="POST" enctype="multipart/form-data">
+		<!-- <label for="file">Filename </label> -->
+		<input type="file" name="file" id="file">
+		<input type="submit" name="submit" value="Submit">
+	</form>
+    <br/>
+	<table>
+		<caption>List of files</caption>
+		<tr>
+			<th><input type="checkbox" id="global_checkbox" onchange="checkAll()"/></th> <th>#</th> <th>Filename</th> <th>URL</th>
+		</tr>
+		{{range .Entries}}
+		<tr>
+			<td><input type="checkbox" class="row_checkbox" id="{{.ID}}"/></td> <td>{{.ID}}</td> <td>{{.Filename}}</td>	<td><a href="{{.URL}}">{{.URL}}</a></td>
+		</tr>
+		{{end}}
+	</table>
+    <br/>
+	<input type="button" value="Delete selected files" onclick="deleteRows()"/>
+	<br/>
+	<br/>
+	<input type="button" value="Logout" onclick="logOut()">
+
+    <script type="text/javascript">
+        function checkAll() {
+            var isGlobalChecked = document.getElementById('global_checkbox').checked;
+            var row_checkboxes = document.getElementsByClassName('row_checkbox');
+            for (var i=0; i < row_checkboxes.length; i++ ) {
+                row_checkboxes[i].checked = isGlobalChecked;
+            }
+        }
+
+        function sendData(ids) {
+            var XHR = new XMLHttpRequest();
+            var FD = new FormData();
+            var idsstring = ids.join(',');
+            FD.append('id', idsstring);
+            XHR.addEventListener('load', function(event) {
+                window.location.reload();
+            });
+            XHR.addEventListener('error', function(event) {
+               alert('Error!')
+            });
+            XHR.open('DELETE', '/upload');
+            XHR.send(FD);
+        }
+
+        function deleteRows() {
+            var checkedIDs = [];
+            var row_checkboxes = document.getElementsByClassName('row_checkbox');
+            for (var i=0; i < row_checkboxes.length; i++ ) {
+                if (row_checkboxes[i].checked === true) {
+                    checkedIDs.push(row_checkboxes[i].id)
+                }
+            }
+            if (checkedIDs.length === 0) {
+                return
+            }
+            if (confirm('Delete selected files?')) {
+                sendData(checkedIDs);
+            }
+        }
+
+        function logOut() {
+        	window.location.href = '/logout';
+        }
+    </script>
+</body>
+</html>
