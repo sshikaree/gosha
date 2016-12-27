@@ -11,4 +11,7 @@ Default username/password : admin/admin
 
 
 /upload - main window
+
 /user - change username and password
+
+![Alt text](/screenshot.png?raw=true)
