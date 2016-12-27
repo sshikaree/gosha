@@ -301,7 +301,8 @@ func main() {
 	http.HandleFunc("/upload", uploadHandler)
 	http.HandleFunc("/login", loginHandler)
 	http.HandleFunc("/logout", logOut)
-	http.HandleFunc("/signup", signupHandler)
+	// Implement later
+	// http.HandleFunc("/signup", signupHandler)
 	http.HandleFunc("/user", userHandler)
 
 	http.HandleFunc("/", Index)
