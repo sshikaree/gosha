@@ -1,14 +1,9 @@
 package main
 
 import (
-	"code.google.com/p/go.crypto/bcrypt"
 	"crypto/md5"
-	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"github.com/go-martini/martini"
-	"github.com/martini-contrib/sessions"
-	_ "github.com/mattn/go-sqlite3"
 	"html/template"
 	"io/ioutil"
 	"log"
@@ -18,7 +13,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
+
+func HashToString(hash []byte) string {
+	return fmt.Sprintf("%x", hash)
+}
 
 const (
 	MEMORY_BUF    = 2 * 1024 * 1024   // 2MB
@@ -27,84 +28,7 @@ const (
 	PORT          = "8080"
 )
 
-type User struct {
-	ID    int
-	Name  string
-	Email string
-	Role  string
-}
-
-type Entry struct {
-	ID       int
-	Filename string
-	Data     []byte
-	Hash     []byte
-	URL      string
-}
-
-var UploadPageTemplate = template.Must(template.ParseFiles("./templates/upload.html"))
-
-func DBConnect() *sql.DB {
-	db, err := sql.Open("sqlite3", DB_FILE)
-	if err != nil {
-		log.Println(err)
-	}
-	return db
-}
-
-func DBSetup() error {
-	db := DBConnect()
-	defer db.Close()
-	_, err := db.Exec(
-		`CREATE TABLE IF NOT EXISTS files (id INTEGER NOT NULL PRIMARY KEY, hash BLOB NOT NULL UNIQUE, data BLOB, filename TEXT);
-		CREATE TABLE IF NOT EXISTS users (id INTEGER NOT NULL PRIMARY KEY, username TEXT NOT NULL UNIQUE, email TEXT NOT NULL, password TEXT NOT NULL);`,
-	)
-	return err
-}
-
-func DBUsersCount(db *sql.DB) (int, error) {
-	var rows_number int
-	err := db.QueryRow("SELECT COUNT(*) FROM users").Scan(&rows_number)
-	return rows_number, err
-}
-
-func DBGetData(db *sql.DB, hash []byte) ([]byte, string, error) {
-	file := struct {
-		data     []byte
-		fileName string
-	}{}
-	err := db.QueryRow("SELECT data, filename FROM files WHERE hash=?", hash).Scan(&file.data, &file.fileName)
-	return file.data, file.fileName, err
-}
-
-func DBGetFilesList(db *sql.DB, r *http.Request) []Entry {
-	entry := Entry{}
-	list := []Entry{}
-
-	rows, err := db.Query("SELECT id, filename, hash FROM files ORDER BY id DESC")
-	if err != nil {
-		log.Println(err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		rows.Scan(&entry.ID, &entry.Filename, &entry.Hash)
-		entry.URL = fmt.Sprintf("https://%s/%x", r.Host, entry.Hash)
-		list = append(list, entry)
-	}
-	return list
-
-}
-
-func DBCreateEntry(db *sql.DB, hash []byte, data []byte, filename string) error {
-	_, err := db.Exec("INSERT INTO files (hash, data, filename) VALUES (?, ?, ?)", hash, data, filename)
-	return err
-}
-
-
-func DBDeleteEntryByID(db *sql.DB, id int) error {
-	_, err := db.Exec("DELETE FROM files WHERE id=?", id)
-	return err
-}
+var tmpls = template.Must(template.ParseGlob("./templates/*.html"))
 
 func GenerateRandomHash() []byte {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -114,14 +38,8 @@ func GenerateRandomHash() []byte {
 
 // Handlers
 
-func ServeFile(w http.ResponseWriter, r *http.Request, db *sql.DB, params martini.Params) {
-
-	if params["URL"] == "upload" {
-		http.Redirect(w, r, "/upload", http.StatusMovedPermanently)
-		return
-	}
-	log.Println(params["URL"])
-	hash, err := hex.DecodeString(params["URL"])
+func ServeFile(w http.ResponseWriter, r *http.Request) {
+	hash, err := hex.DecodeString(strings.Replace(r.URL.Path, "/", "", -1))
 	if err != nil {
 		log.Println(err)
 		http.NotFound(w, r)
@@ -129,48 +47,58 @@ func ServeFile(w http.ResponseWriter, r *http.Request, db *sql.DB, params martin
 	}
 	log.Println(hash)
 
-	data, filename, err := DBGetData(db, hash)
+	f, err := GetFile(r, hash)
 	if err != nil {
-		log.Println(err)
+		// log.Println(err)
 		http.NotFound(w, r)
 		return
 	}
 
-	contentType := http.DetectContentType(data)
+	contentType := http.DetectContentType(f.Data)
 	log.Println(contentType)
 
 	header := w.Header()
 	// header.Set("Content-Disposition", "attachment;filename=\"test1.txt\"")
 	header.Set("Content-Type", contentType)
-	header.Set("Content-Disposition", "filename=\""+filename+"\"")
+	header.Set("Content-Disposition", "filename=\""+f.Filename+"\"")
 	log.Println(header)
 
-	w.Write(data)
+	w.Write(f.Data)
 }
 
-func ShowUploadPage(w http.ResponseWriter, r *http.Request, user *User, db *sql.DB) {
-	if user.Email == "" {
+func ShowUploadPage(w http.ResponseWriter, r *http.Request) {
+	user := checkSession(r)
+	if user == nil {
 		http.Redirect(w, r, "/login", http.StatusFound)
+		return
 	}
-	// log.Println(r.Header)
 
-	entries := DBGetFilesList(db, r)
+	entries := GetUserFilesList(r, user)
 	data := struct {
 		Entries []Entry
+		User    *User
 	}{
 		Entries: entries,
+		User:    user,
 	}
-	err := UploadPageTemplate.ExecuteTemplate(w, "upload.html", data)
+	err := tmpls.ExecuteTemplate(w, "upload.html", data)
 	if err != nil {
 		log.Println(err)
 		http.Error(w, err.Error(), http.StatusNotFound)
+		return
 	}
 }
 
-func UploadFile(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+func UploadFile(w http.ResponseWriter, r *http.Request) {
+	user := checkSession(r)
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
 	if err := r.ParseMultipartForm(MEMORY_BUF); err != nil {
 		log.Println(err)
 		http.Error(w, err.Error(), http.StatusForbidden)
+		return
 	}
 
 	for key, value := range r.MultipartForm.Value {
@@ -183,16 +111,22 @@ func UploadFile(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			file, _ := fileHeader.Open()
 			buf, _ := ioutil.ReadAll(file)
 			hash := GenerateRandomHash()
-			err := DBCreateEntry(db, hash, buf, fileHeader.Filename)
+			err := CreateEntry(hash, buf, fileHeader.Filename, user)
 			if err != nil {
 				log.Println(err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
 			}
 		}
 	}
-
 }
 
-func UploadFromForm(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+func UploadFromForm(w http.ResponseWriter, r *http.Request) {
+	user := checkSession(r)
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		w.Write([]byte(err.Error()))
@@ -201,164 +135,176 @@ func UploadFromForm(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	defer file.Close()
 	buf, _ := ioutil.ReadAll(file)
 	hash := GenerateRandomHash()
-	err = DBCreateEntry(db, hash, buf, header.Filename)
+	err = CreateEntry(hash, buf, header.Filename, user)
 	if err != nil {
 		log.Println(err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	// fmt.Fprintf(w, "%s ~> https://%s/%x", header.Filename, r.Host, hash)
 	http.Redirect(w, r, "/upload", http.StatusFound)
-
+	return
 }
 
-func DeleteFiles(w http.ResponseWriter, r *http.Request, db *sql.DB, user *User) {
-	if user.Email == "" {
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		ShowUploadPage(w, r)
+	case "POST":
+		UploadFromForm(w, r)
+	case "DELETE":
+		DeleteFiles(w, r)
+	}
+}
+
+func DeleteFiles(w http.ResponseWriter, r *http.Request) {
+	user := checkSession(r)
+	if user == nil {
 		http.Redirect(w, r, "/login", http.StatusFound)
+		return
 	}
 	ids := r.FormValue("id")
 	log.Println(ids)
 	for _, id := range strings.Split(ids, ",") {
-		int_id, err := strconv.Atoi(id)
+		int_id, err := strconv.ParseUint(id, 10, 64)
 		if err != nil {
 			log.Println(err)
 			continue
 		} else {
-			DBDeleteEntryByID(db, int_id)
+			DeleteEntryByID(int_id)
 		}
-
 	}
 	// http.Redirect(w, r, "/upload", http.StatusFound)
 }
 
 func Index(w http.ResponseWriter, r *http.Request) {
-	page, err := ioutil.ReadFile("./static/html/index.html")
-	if err != nil {
-		log.Println(err)
-		http.Error(w, "Cannot open file", http.StatusInternalServerError)
+	if r.URL.Path != "/" {
+		ServeFile(w, r)
+		return
 	}
-	w.Write([]byte(page))
+	http.ServeFile(w, r, "./static/html/index.html")
+
 }
 
-func ClassicMartiniWithoutLogging() *martini.ClassicMartini {
-	r := martini.NewRouter()
-	m := martini.New()
-	m.Use(martini.Recovery())
-	m.Use(martini.Static("static", martini.StaticOptions{Prefix: "/static/"}))
-	m.MapTo(r, (*martini.Routes)(nil))
-	m.Action(r.Handle)
-	return &martini.ClassicMartini{m, r}
+func getSignUp(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, "./static/html/signup.html")
 }
 
-func ShowLoginPage(w http.ResponseWriter, r *http.Request, s sessions.Session, db *sql.DB, user *User) {
-	users_count, err := DBUsersCount(db)
-	if err != nil {
-		log.Println(err)
-	}
-	if users_count < 1 {
-		http.Redirect(w, r, "/signup", http.StatusFound)
-	}
-	s.Set("LoginError", "") // Remove error cookie after page was shown
-	// err := LoginTemplates.ExecuteTemplate(w, "login.html", data)
-	page, err := ioutil.ReadFile("./static/html/login.html")
-	if err != nil {
-		log.Println(err)
-	}
-	w.Write(page)
-}
-
-func SignUpGET(w http.ResponseWriter, r *http.Request) {
-	page, err := ioutil.ReadFile("./static/html/signup.html")
-	if err != nil {
-		log.Println(err)
-	}
-	w.Write(page)
-}
-
-func SignUpPOST(w http.ResponseWriter, r *http.Request, db *sql.DB) {
-	name, email, pass := r.FormValue("name"), r.FormValue("email"), r.FormValue("pass")
-	hashedPass, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
-	if err != nil {
-		log.Println(err)
-	}
-	_, err = db.Exec("INSERT INTO users (username, email, password) VALUES (?, ?, ?)", name, email, hashedPass)
-	if err != nil {
-		log.Println(err)
+func postSignUp(w http.ResponseWriter, r *http.Request) {
+	u := new(User)
+	u.Name, u.Email, u.Password = r.FormValue("name"), r.FormValue("email"), r.FormValue("pass")
+	if err := CreateUser(u); err != nil {
+		// w.Write([]byte("Error: " + err.Error()))
+		// http.Redirect(w, r, "/signup", http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	http.Redirect(w, r, "/upload", http.StatusFound)
+	return
 }
 
-func LogIn(w http.ResponseWriter, r *http.Request, db *sql.DB, s sessions.Session, user *User) {
-	var (
-		id             int
-		hashedPassword string
-	)
+func signupHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		getSignUp(w, r)
+	case "POST":
+		postSignUp(w, r)
+	}
+}
 
-	email, pass := r.FormValue("email"), r.FormValue("pass")
-	err := db.QueryRow("SELECT id, password FROM users WHERE email=?", email).Scan(&id, &hashedPassword)
+func getLogin(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, "./static/html/login.html")
+}
+
+func postLogin(w http.ResponseWriter, r *http.Request) {
+	username, pass := r.FormValue("name"), r.FormValue("pass")
+	user, err := GetUserByName(username)
 	if err != nil {
-		if err.Error() == "sql: no rows in result set" {
-			s.Set("LoginError", "Wrong e-mail or password!")
-			http.Redirect(w, r, "/login", http.StatusFound)
-		} else {
-			log.Println(err)
-			s.Set("LoginError", "Database error")
-			http.Redirect(w, r, "/login", http.StatusFound)
-		}
-		return
-
-	} else if bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(pass)) != nil {
-		s.Set("LoginError", "Wrong e-mail or password!")
+		// log.Println(err)
 		http.Redirect(w, r, "/login", http.StatusFound)
 		return
 	}
-
-	s.Set("LoginError", "")
-	s.Set("UserID", id)
-	http.Redirect(w, r, "/upload", http.StatusFound)
-}
-
-func LogOut(w http.ResponseWriter, r *http.Request, s sessions.Session) {
-	s.Delete("UserID")
-	http.Redirect(w, r, "/", http.StatusFound)
-}
-
-func CheckIfLogged(w http.ResponseWriter, r *http.Request, s sessions.Session, db *sql.DB, c martini.Context) {
-	user := &User{}
-	err := db.QueryRow("SELECT username, email FROM users WHERE id=?",
-		s.Get("UserID")).Scan(&user.Name, &user.Email)
-	if err != nil {
-		if err.Error() != "sql: no rows in result set" {
-			log.Println(err)
-		}
+	if bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(pass)) != nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
 	}
-	c.Map(user)
+	err = StartSession(w, user)
+	if err != nil {
+		log.Println(err)
+		http.Error(w, err.Error(), http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, "/upload", http.StatusFound)
+	return
+}
+
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		getLogin(w, r)
+	case "POST":
+		postLogin(w, r)
+	}
+}
+
+func logOut(w http.ResponseWriter, r *http.Request) {
+	err := DeleteSession(w, r)
+	if err != nil {
+		log.Println(err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusFound)
+	return
+}
+
+func userHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		getUserPage(w, r)
+	case "POST":
+		postUserPage(w, r)
+	}
+}
+
+func getUserPage(w http.ResponseWriter, r *http.Request) {
+	user := checkSession(r)
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	tmpls.ExecuteTemplate(w, "user.html", user)
+}
+
+func postUserPage(w http.ResponseWriter, r *http.Request) {
+	user := checkSession(r)
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	user.Name, user.Email, user.Password = r.FormValue("name"), r.FormValue("email"), r.FormValue("pass")
+	if err := UpdateUser(user); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	http.Redirect(w, r, "/upload", http.StatusFound)
+	return
 }
 
 func main() {
 	log.SetFlags(log.Lshortfile | log.Ldate | log.Ltime)
 
-	err := DBSetup()
-	if err != nil {
-		log.Println(err)
-	}
+	SetupDB()
+	defer DB.Close()
 
-	m := ClassicMartiniWithoutLogging()
-	m.Map(DBConnect())
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static"))))
 
-	store := sessions.NewCookieStore([]byte("mysecret"))
-	m.Use(sessions.Sessions("fileshare", store))
-	m.Use(CheckIfLogged)
+	http.HandleFunc("/upload", uploadHandler)
+	http.HandleFunc("/login", loginHandler)
+	http.HandleFunc("/logout", logOut)
+	http.HandleFunc("/signup", signupHandler)
+	http.HandleFunc("/user", userHandler)
 
-	m.Get("/", Index)
-	m.Get("/upload", ShowUploadPage)
-	m.Post("/upload/v1/", UploadFile)
-	m.Post("/upload", UploadFromForm)
-	m.Delete("/upload", DeleteFiles)
-	m.Get("/login(/*)", ShowLoginPage)
-	m.Post("/login(/*)", LogIn)
-	m.Get("/logout(/*)", LogOut)
-	m.Get("/signup(/*)", SignUpGET)
-	m.Post("/signup(/*)", SignUpPOST)
-	m.Get("/:URL", ServeFile)
+	http.HandleFunc("/", Index)
 
 	// Start server
 	host := os.Getenv("HOST")
@@ -371,5 +317,8 @@ func main() {
 	}
 	bind := fmt.Sprintf("%s:%s", host, port)
 	fmt.Printf("Listening on %s...\n", bind)
-	log.Fatal(http.ListenAndServe(bind, m))
+
+	go SessionCleaner()
+
+	log.Fatal(http.ListenAndServe(bind, nil))
 }
