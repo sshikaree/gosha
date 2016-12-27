@@ -41,7 +41,7 @@ func GenerateRandomHash() []byte {
 func ServeFile(w http.ResponseWriter, r *http.Request) {
 	hash, err := hex.DecodeString(strings.Replace(r.URL.Path, "/", "", -1))
 	if err != nil {
-		log.Println(err)
+		// log.Println(err)
 		http.NotFound(w, r)
 		return
 	}
@@ -194,8 +194,6 @@ func postSignUp(w http.ResponseWriter, r *http.Request) {
 	u := new(User)
 	u.Name, u.Email, u.Password = r.FormValue("name"), r.FormValue("email"), r.FormValue("pass")
 	if err := CreateUser(u); err != nil {
-		// w.Write([]byte("Error: " + err.Error()))
-		// http.Redirect(w, r, "/signup", http.StatusInternalServerError)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -301,6 +299,7 @@ func main() {
 	http.HandleFunc("/upload", uploadHandler)
 	http.HandleFunc("/login", loginHandler)
 	http.HandleFunc("/logout", logOut)
+	// User management
 	// Implement later
 	// http.HandleFunc("/signup", signupHandler)
 	http.HandleFunc("/user", userHandler)
